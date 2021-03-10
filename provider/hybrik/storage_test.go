@@ -1,56 +1,28 @@
 package hybrik
 
-import "testing"
+import (
+	"testing"
 
-func Test_storageProviderFrom(t *testing.T) {
+	"github.com/cbsinteractive/transcode-orchestrator/job"
+)
+
+func TestStorage(t *testing.T) {
 	tests := []struct {
-		name, path   string
-		wantProvider storageProvider
-		wantErr      string
+		name, path, want string
 	}{
-		{
-			name:         "s3 schemes are identified correctly",
-			path:         "s3://some-bucket/some-path",
-			wantProvider: storageProviderS3,
-		},
-		{
-			name:         "gcs schemes are identified correctly",
-			path:         "gs://some-bucket/some-path",
-			wantProvider: storageProviderGCS,
-		},
-		{
-			name:         "http schemes are identified correctly",
-			path:         "http://some-domain.com/some-path",
-			wantProvider: storageProviderHTTP,
-		},
-
-		{
-			name:         "https schemes are identified correctly",
-			path:         "https://some-domain.com/some-path",
-			wantProvider: storageProviderHTTP,
-		},
-		{
-			name:    "unsupported schemes return a useful error",
-			path:    "fakescheme://some-bucket/some-path",
-			wantErr: `the scheme "fakescheme" is unsupported`,
-		},
-		{
-			name:    "bad paths return a useful error",
-			path:    "%fsdf://some-bucket/some-path",
-			wantErr: `parse "%fsdf://some-bucket/some-path": first path segment in URL cannot contain colon`,
-		},
+		{"s3", "s3://some-bucket/some-path", "s3"},
+		{"gs", "gs://some-bucket/some-path", "gs"},
+		{"http", "http://some-domain.com/some-path", "http"},
+		{"https", "https://some-domain.com/some-path", "https"},
+		// {"unsupported", "fakescheme://some-bucket/some-path", "", `the scheme "fakescheme" is unsupported`},
+		{"bad", "%fsdf://some-bucket/some-path", ""},
 	}
 
 	for _, tt := range tests {
-
 		t.Run(tt.name, func(t *testing.T) {
-			prov, err := storageProviderFrom(tt.path)
-			if shouldReturn := assertWantErr(err, tt.wantErr, "storageProviderFrom()", t); shouldReturn {
-				return
-			}
-
-			if g, e := prov, tt.wantProvider; g != e {
-				t.Fatalf("storageProviderFrom() wrong provider: got %q, expected %q", g, e)
+			h := job.File{Name: tt.path}.Provider()
+			if h != tt.want {
+				t.Fatalf("wrong provider: have %q, want %q", h, tt.want)
 			}
 		})
 	}

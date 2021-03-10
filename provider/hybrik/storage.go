@@ -1,101 +1,75 @@
 package hybrik
 
 import (
-	"fmt"
-	"net/url"
-
-	"github.com/cbsinteractive/hybrik-sdk-go"
+	hy "github.com/cbsinteractive/hybrik-sdk-go"
+	"github.com/cbsinteractive/transcode-orchestrator/job"
 )
+
+type storageProvider string
+
+func (p storageProvider) supportsSegmentedRendering() bool { return p != storageProviderHTTP }
+func (p storageProvider) string() string                   { return string(p) }
 
 const (
-	storageSchemeGCS   = "gs"
-	storageSchemeS3    = "s3"
-	storageSchemeHTTPS = "https"
-	storageSchemeHTTP  = "http"
+	storageProviderUnrecognized storageProvider = "unrecognized"
+	storageProviderS3           storageProvider = "s3"
+	storageProviderGCS          storageProvider = "gs"
+	storageProviderHTTP         storageProvider = "http"
 )
 
-type storageLocation struct {
-	provider storageProvider
-	path     string
+var StorageProviders = []string{"s3", "gcs", "http", "https"}
+
+func Supported(f job.File) bool {
+	p := f.Provider()
+	for _, sp := range StorageProviders {
+		if p == sp {
+			return true
+		}
+	}
+	return false
 }
 
-func (p *hybrikProvider) transcodeLocationFrom(dest storageLocation, credsAlias string) hybrik.TranscodeLocation {
-	location := hybrik.TranscodeLocation{
-		StorageProvider: dest.provider.string(),
-		Path:            dest.path,
+func storageBugfix(provider string, sa *hy.StorageAccess) *hy.StorageAccess {
+	if provider == "gs" {
+		// Hybrik has a bug where they identify multi-region GCS -> region GCP
+		// transfers as triggering egress costs, so we remove their validation for
+		// GCS sources
+		sa.MaxCrossRegionMB = -1
 	}
-
-	if access, add := p.storageAccessFrom(dest.provider, credsAlias); add {
-		location.Access = access
-	}
-
-	return location
+	return sa
 }
 
-func (p *hybrikProvider) assetURLFrom(dest storageLocation, credsAlias string) hybrik.AssetURL {
-	assetURL := hybrik.AssetURL{
-		StorageProvider: dest.provider.string(),
-		URL:             dest.path,
+func (p *driver) access(f *job.File, creds string) *hy.StorageAccess {
+	if creds == "" {
+		if f.Provider() != "gs" {
+			return nil
+		}
+		creds = p.config.GCPCredentialsKey
 	}
-
-	if access, add := p.storageAccessFrom(dest.provider, credsAlias); add {
-		assetURL.Access = access
-	}
-
-	return assetURL
+	return storageBugfix(f.Provider(), &hy.StorageAccess{CredentialsKey: creds})
 }
 
-func (p *hybrikProvider) assetPayloadFrom(provider storageProvider, url string, contents []hybrik.AssetContents, credAlias string) hybrik.AssetPayload {
-	assetPayload := hybrik.AssetPayload{
-		StorageProvider: provider.string(),
-		URL:             url,
-		Contents:        contents,
+func (p *driver) location(f job.File, creds string) hy.TranscodeLocation {
+	return hy.TranscodeLocation{
+		StorageProvider: f.Provider(),
+		Path:            f.Dir(),
+		Access:          p.access(&f, creds),
 	}
-
-	if access, add := p.storageAccessFrom(provider, credAlias); add {
-		assetPayload.Access = access
-	}
-
-	return assetPayload
 }
 
-func (p *hybrikProvider) storageAccessFrom(provider storageProvider, credsAlias string) (*hybrik.StorageAccess, bool) {
-	var maxCrossRegionMB int
-
-	// Hybrik has a bug where they identify multi-region GCS -> region GCP
-	// transfers as triggering egress costs, so we remove their validation for
-	// GCS sources
-	if provider == storageProviderGCS {
-		maxCrossRegionMB = -1
+func (p *driver) assetURL(f *job.File, creds string) hy.AssetURL {
+	return hy.AssetURL{
+		StorageProvider: f.Provider(),
+		URL:             f.Name,
+		Access:          p.access(f, creds),
 	}
-
-	if credsAlias != "" {
-		return &hybrik.StorageAccess{CredentialsKey: credsAlias, MaxCrossRegionMB: maxCrossRegionMB}, true
-	}
-
-	if provider == storageProviderGCS {
-		return &hybrik.StorageAccess{CredentialsKey: p.config.GCPCredentialsKey, MaxCrossRegionMB: maxCrossRegionMB}, true
-	}
-
-	return nil, false
 }
 
-func storageProviderFrom(path string) (storageProvider, error) {
-	u, err := url.Parse(path)
-	if err != nil {
-		return storageProviderUnrecognized, err
+func (p *driver) asset(f *job.File, creds string, content ...hy.AssetContents) hy.AssetPayload {
+	return hy.AssetPayload{
+		StorageProvider: f.Provider(),
+		URL:             f.Name,
+		Contents:        content,
+		Access:          p.access(f, creds),
 	}
-
-	switch u.Scheme {
-	case storageSchemeS3:
-		return storageProviderS3, nil
-	case storageSchemeGCS:
-		return storageProviderGCS, nil
-	case storageSchemeHTTPS:
-		return storageProviderHTTP, nil
-	case storageSchemeHTTP:
-		return storageProviderHTTP, nil
-	}
-
-	return storageProviderUnrecognized, fmt.Errorf("the scheme %q is unsupported", u.Scheme)
 }

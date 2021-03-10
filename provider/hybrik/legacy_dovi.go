@@ -3,184 +3,94 @@ package hybrik
 import (
 	"fmt"
 
-	"github.com/cbsinteractive/hybrik-sdk-go"
-	"github.com/cbsinteractive/transcode-orchestrator/db"
+	hy "github.com/cbsinteractive/hybrik-sdk-go"
+	"github.com/cbsinteractive/transcode-orchestrator/job"
 )
 
-// TODO remove once Hybrik fixes bugs with the new Dolby Vision job structure
+func (p *driver) dolbyVisionLegacy(j *Job) [][]hy.Element {
+	txcode := p.transcodeElems(mute(*j))
 
-const (
-	dolbyVisionElementID                  = "dolby_vision_task"
-	doViModuleProfile                     = "profile"
-	doViNBCPreProcOutputPathTmpl          = "%s/tmp"
-	doViVESMuxOutputPathTmpl              = "%s/tmp"
-	doViVESMuxFilenameDefault             = "ves.h265"
-	doViMetadataPostProcOutputPathTmpl    = "%s/tmp"
-	doViMetadataPostProcFilenameDefault   = "postproc.265"
-	doViMetadataPostProcQCOutputPathTmpl  = "%s/tmp"
-	doViMetadataPostProcQCFilenameDefault = "metadata_postproc_qc_report.txt"
-	doViMP4MuxQCOutputPathTmpl            = "%s/tmp"
-	doViMP4MuxQCFilenameDefault           = "mp4_qc_report.txt"
-	doViSourceDemuxOutputPathTmpl         = "%s/tmp"
-	doViLegacyMezzQCOutputPathTmpl        = "%s/tmp"
-	doViPreProcNumTasksAuto               = "auto"
-	doViPreProcIntervalLengthDefault      = 48
-	doViInputEDRAspectDefault             = "2"
-	doViInputEDRCropDefault               = "0x0x0x0"
-	doViInputEDRPadDefault                = "0x0x0x0"
+	var preproc = struct {
+		Tasks    string `json:"doViPreProcNumTasks,omitempty"`
+		Interval int    `json:"doViPreProcIntervalLength,omitempty"`
+	}{"auto", 48}
 
-	retryMethodRetry  = "retry"
-	retryCountDefault = 3
-	retryDelayDefault = 30
-)
+	features0(j, &preproc)
 
-func (p *hybrikProvider) dolbyVisionLegacyElementAssembler(cfg jobCfg) ([][]hybrik.Element, error) {
-	presetsWithoutAudio := map[string]db.Preset{}
-	for _, outputCfg := range cfg.outputCfgs {
-		preset := outputCfg.localPreset
+	tag := tag(j, job.TagDolbyVisionPreprocess, "preproc")
+	src := p.assetURL(&j.Input, p.auth(j).Write)
+	dst := p.location(j.Dir(), p.auth(j).Write)
+	tmp := p.location(j.Dir().Join("tmp"), p.auth(j).Write)
 
-		// removing audio so we can processing this separately
-		preset.Audio = db.AudioPreset{}
-		presetsWithoutAudio[outputCfg.filename] = preset
-	}
+	// src := p.assetURLFrom(storageLocation{provider: cfg.sourceLocation.provider, path: cfg.sourceLocation.path}, cfg.executionEnvironment.OutputAlias)
+	//dst := p.transcodeLocationFrom(storageLocation{provider: cfg.destination.provider,path:     cfg.destination.path,}, cfg.executionEnvironment.OutputAlias)
+	// tmp := p.transcodeLocationFrom(storageLocation{provider: cfg.destination.provider, path: fmt.Sprintf("%s/tmp", cfg.destination.path)}, cfg.executionEnvironment.OutputAlias)
 
-	transcodeElementsWithFilenames, err := p.transcodeElementsWithPresetsFrom(presetsWithoutAudio, cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	transcodeElements := []hybrik.Element{}
-	for _, transcodeWithFilename := range transcodeElementsWithFilenames {
-		transcodeElements = append(transcodeElements, transcodeWithFilename.transcodeElement)
-	}
-
-	doViPreProcNumTasks := doViPreProcNumTasksAuto
-	if numTasks := cfg.executionFeatures.doViPreProcSegmentation.numTasks; numTasks != "" {
-		doViPreProcNumTasks = numTasks
-	}
-
-	doViPreProcIntervalLength := doViPreProcIntervalLengthDefault
-	if intervalLength := cfg.executionFeatures.doViPreProcSegmentation.intervalLength; intervalLength != 0 {
-		doViPreProcIntervalLength = intervalLength
-	}
-
-	preprocComputeTag := computeTagPreProcDefault
-	if tag, found := cfg.computeTags[db.ComputeClassDolbyVisionPreprocess]; found {
-		preprocComputeTag = tag
-	}
-
-	destStorageLocation := p.transcodeLocationFrom(storageLocation{
-		provider: cfg.destination.provider,
-		path:     cfg.destination.path,
-	}, cfg.executionEnvironment.OutputAlias)
-
-	demuxOutputStorageLocation := p.transcodeLocationFrom(storageLocation{
-		provider: cfg.destination.provider,
-		path:     fmt.Sprintf(doViSourceDemuxOutputPathTmpl, cfg.destination.path),
-	}, cfg.executionEnvironment.OutputAlias)
-
-	return [][]hybrik.Element{{{
-		UID:  dolbyVisionElementID,
-		Kind: elementKindDolbyVision,
-		Task: &hybrik.ElementTaskOptions{
-			Tags: []string{preprocComputeTag},
-		},
-		Payload: hybrik.DolbyVisionTaskPayload{
-			Module:  doViModuleProfile,
-			Profile: doViProfile5,
-			MezzanineQC: hybrik.DoViMezzanineQC{
-				Enabled: false,
-				Location: p.transcodeLocationFrom(storageLocation{
-					provider: cfg.destination.provider,
-					path:     fmt.Sprintf(doViLegacyMezzQCOutputPathTmpl, cfg.destination.path),
-				}, cfg.executionEnvironment.OutputAlias),
-				Task: hybrik.TaskTags{
-					Tags: []string{preprocComputeTag},
-				},
-				FilePattern: fmt.Sprintf(doViMezzQCReportFilenameTmpl, cfg.jobID),
-				ToolVersion: hybrik.DoViMezzQCVersionDefault,
+	return [][]hy.Element{{{
+		UID:  "dolby_vision_task",
+		Kind: "dolby_vision",
+		Task: &hy.ElementTaskOptions{Tags: tag},
+		Payload: hy.DolbyVisionTaskPayload{
+			Module: "profile", Profile: 5,
+			MezzanineQC: hy.DoViMezzanineQC{
+				Enabled:  false, // NOTE(as): why is this thing even set then?
+				Location: tmp, FilePattern: fmt.Sprintf("%s_mezz_qc_report.txt", j.ID),
+				Task:        hy.TaskTags{Tags: tag},
+				ToolVersion: hy.DoViMezzQCVersionDefault,
 			},
-			NBCPreproc: hybrik.DoViNBCPreproc{
-				Task: hybrik.TaskTags{
-					Tags: []string{preprocComputeTag},
-				},
-				Location: p.transcodeLocationFrom(storageLocation{
-					provider: cfg.destination.provider,
-					path:     fmt.Sprintf(doViNBCPreProcOutputPathTmpl, cfg.destination.path),
-				}, cfg.executionEnvironment.OutputAlias),
-				SDKVersion:     hybrik.DoViSDKVersionDefault,
-				NumTasks:       doViPreProcNumTasks,
-				IntervalLength: doViPreProcIntervalLength,
-				CLIOptions: hybrik.DoViNBCPreprocCLIOptions{
-					InputEDRAspect: doViInputEDRAspectDefault,
-					InputEDRPad:    doViInputEDRCropDefault,
-					InputEDRCrop:   doViInputEDRPadDefault,
+			NBCPreproc: hy.DoViNBCPreproc{
+				Task:           hy.TaskTags{Tags: tag},
+				Location:       tmp,
+				SDKVersion:     hy.DoViSDKVersionDefault,
+				NumTasks:       preproc.Tasks,
+				IntervalLength: preproc.Interval,
+				CLIOptions: hy.DoViNBCPreprocCLIOptions{
+					InputEDRAspect: "2",
+					InputEDRPad:    "0x0x0x0",
+					InputEDRCrop:   "0x0x0x0",
 				},
 			},
-			Transcodes: transcodeElements,
-			PostTranscode: hybrik.DoViPostTranscode{
-				Task: &hybrik.TaskTags{Tags: []string{preprocComputeTag}},
-				VESMux: &hybrik.DoViVESMux{
-					Enabled: true,
-					Location: p.transcodeLocationFrom(storageLocation{
-						provider: cfg.destination.provider,
-						path:     fmt.Sprintf(doViVESMuxOutputPathTmpl, cfg.destination.path),
-					}, cfg.executionEnvironment.OutputAlias),
-					FilePattern: doViVESMuxFilenameDefault,
-					SDKVersion:  hybrik.DoViSDKVersionDefault,
+			Transcodes: txcode,
+			PostTranscode: hy.DoViPostTranscode{
+				Task: &hy.TaskTags{Tags: tag},
+				VESMux: &hy.DoViVESMux{
+					Location: tmp, FilePattern: "ves.h265",
+					SDKVersion: hy.DoViSDKVersionDefault, Enabled: true,
 				},
-				MetadataPostProc: &hybrik.DoViMetadataPostProc{
-					Enabled: true,
-					Location: p.transcodeLocationFrom(storageLocation{
-						provider: cfg.destination.provider,
-						path:     fmt.Sprintf(doViMetadataPostProcOutputPathTmpl, cfg.destination.path),
-					}, cfg.executionEnvironment.OutputAlias),
-					FilePattern: doViMetadataPostProcFilenameDefault,
-					SDKVersion:  hybrik.DoViSDKVersionDefault,
-					QCSettings: hybrik.DoViQCSettings{
+				MetadataPostProc: &hy.DoViMetadataPostProc{
+					Location: tmp, FilePattern: "postproc.265",
+					QCSettings: hy.DoViQCSettings{
+						Location: tmp, FilePattern: "metadata_postproc_qc_report.txt",
+						ToolVersion: hy.DoViVesQCVersionDefault,
 						Enabled:     true,
-						ToolVersion: hybrik.DoViVesQCVersionDefault,
-						Location: p.transcodeLocationFrom(storageLocation{
-							provider: cfg.destination.provider,
-							path:     fmt.Sprintf(doViMetadataPostProcQCOutputPathTmpl, cfg.destination.path),
-						}, cfg.executionEnvironment.OutputAlias),
-						FilePattern: doViMetadataPostProcQCFilenameDefault,
 					},
+					Enabled: true, SDKVersion: hy.DoViSDKVersionDefault,
 				},
-				MP4Mux: hybrik.DoViMP4Mux{
+				MP4Mux: hy.DoViMP4Mux{
 					Enabled:            true,
-					Location:           &destStorageLocation,
-					FilePattern:        doViMP4MuxFilenameDefault,
-					ToolVersion:        hybrik.DoViMP4MuxerVersionDefault,
+					FilePattern:        "{source_basename}.mp4",
+					Location:           &dst,
+					ToolVersion:        hy.DoViMP4MuxerVersionDefault,
 					CopySourceStartPTS: true,
-					CLIOptions:         map[string]string{doViMP4MuxDVH1FlagKey: ""},
-					QCSettings: &hybrik.DoViQCSettings{
+					CLIOptions:         map[string]string{"dvh1flag": ""},
+					QCSettings: &hy.DoViQCSettings{
 						Enabled:     true,
-						ToolVersion: hybrik.DoViMP4QCVersionDefault,
-						Location: p.transcodeLocationFrom(storageLocation{
-							provider: cfg.destination.provider,
-							path:     fmt.Sprintf(doViMP4MuxQCOutputPathTmpl, cfg.destination.path),
-						}, cfg.executionEnvironment.OutputAlias),
-						FilePattern: doViMP4MuxQCFilenameDefault,
+						FilePattern: "mp4_qc_report.txt",
+						Location:    tmp,
+						ToolVersion: hy.DoViMP4QCVersionDefault,
 					},
-					ElementaryStreams: []hybrik.DoViMP4MuxElementaryStream{{
-						AssetURL: p.assetURLFrom(storageLocation{
-							provider: cfg.sourceLocation.provider,
-							path:     cfg.sourceLocation.path,
-						}, cfg.executionEnvironment.OutputAlias),
+					ElementaryStreams: []hy.DoViMP4MuxElementaryStream{{
+						AssetURL:        src,
 						ExtractAudio:    true,
-						ExtractLocation: &demuxOutputStorageLocation,
-						ExtractTask: &hybrik.DoViMP4MuxExtractTask{
-							RetryMethod: retryMethodRetry,
-							Retry: hybrik.Retry{
-								Count:    retryCountDefault,
-								DelaySec: retryDelayDefault,
-							},
-							Name: "Demux Audio",
+						ExtractLocation: &tmp,
+						ExtractTask: &hy.DoViMP4MuxExtractTask{
+							RetryMethod: "retry",
+							Retry:       hy.Retry{Count: 3, DelaySec: 30},
+							Name:        "Demux Audio",
 						},
 					}},
 				},
 			},
 		},
-	}}}, nil
+	}}}
 }

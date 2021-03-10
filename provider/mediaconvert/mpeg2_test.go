@@ -5,14 +5,14 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/cbsinteractive/transcode-orchestrator/db"
+	"github.com/cbsinteractive/transcode-orchestrator/job"
 )
 
 func TestGenerateMPEG2(t *testing.T) {
-	p := db.Preset{}
+	p := job.File{}
 	p.Video.Codec = "hd422"
-	p.Video.GopSize = "6000"
-	p.Video.Bitrate = "6000"
+	p.Video.Gop.Size = 6000
+	p.Video.Bitrate.BPS = 6000
 	s, err := mpeg2XDCAM.generate(p)
 	if err != nil {
 		t.Fatalf("%v", err)

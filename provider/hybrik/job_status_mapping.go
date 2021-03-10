@@ -1,14 +1,12 @@
 package hybrik
 
 import (
-	"fmt"
-	"log"
 	"path"
 	"regexp"
 	"strings"
 
-	"github.com/cbsinteractive/hybrik-sdk-go"
-	"github.com/cbsinteractive/transcode-orchestrator/provider"
+	hy "github.com/cbsinteractive/hybrik-sdk-go"
+	"github.com/cbsinteractive/transcode-orchestrator/job"
 )
 
 type taskWithOutputMatcher struct {
@@ -16,58 +14,46 @@ type taskWithOutputMatcher struct {
 	uidRegex *regexp.Regexp
 }
 
-var tasksWithOutputsMatchers []taskWithOutputMatcher
+var match = regexp.MustCompile
 
-func init() {
-	doViPostProcessRegex, err := regexp.Compile(`post_transcode_stage_[\d]+$`)
-	if err != nil {
-		log.Panicf("compiling the doVi post process regex: %v", err)
-	}
-
-	doViTranscodeRegex, err := regexp.Compile(`dolby_vision_[\d]+$`)
-	if err != nil {
-		log.Panicf("compiling the doVi transcode regex: %v", err)
-	}
-
-	transcodeRegex, err := regexp.Compile(`transcode_task_[\d]+$`)
-	if err != nil {
-		log.Panicf("compiling the transcode regex: %v", err)
-	}
-
-	packageRegex, err := regexp.Compile(`packager$`)
-	if err != nil {
-		log.Panicf("compiling the package regex: %v", err)
-	}
-
-	combinerRegex, err := regexp.Compile(`combiner_[\d]+$`)
-	if err != nil {
-		log.Panicf("compiling the combiner regex: %v", err)
-	}
-
-	tasksWithOutputsMatchers = []taskWithOutputMatcher{
-		{kind: "Dolby Vision", uidRegex: doViPostProcessRegex},
-		{kind: "Dolby Vision", uidRegex: doViTranscodeRegex},
-		{kind: "Transcode", uidRegex: transcodeRegex},
-		{kind: "Package", uidRegex: packageRegex},
-		{kind: "Combine Segments", uidRegex: combinerRegex},
-	}
+var outputMatchers = []struct {
+	kind     string
+	uidRegex *regexp.Regexp
+}{
+	{"Dolby Vision", match(`post_transcode_stage_[\d]+$`)},
+	{"Dolby Vision", match(`dolby_vision_[\d]+$`)},
+	{"Transcode", match(`transcode_task_[\d]+$`)},
+	{"Package", match(`packager$`)},
+	{"Combine Segments", match(`combiner_[\d]+$`)},
 }
 
-func filesFrom(task hybrik.TaskResult) ([]provider.OutputFile, bool, error) {
+func hasOutputs(task hy.TaskResult) bool {
+	for _, matcher := range outputMatchers {
+		if matcher.kind != task.Kind {
+			continue
+		}
+		if matcher.uidRegex.Match([]byte(task.UID)) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func filesFrom(task hy.TaskResult) (files []job.File, ok bool, err error) {
 	// ensure the task type results in outputs
-	if !taskHasOutputs(task, tasksWithOutputsMatchers) {
+	if !hasOutputs(task) {
 		return nil, false, nil
 	}
 
-	var files []provider.OutputFile
-	for _, document := range task.Documents {
-		for _, assetVersion := range document.ResultPayload.Payload.AssetVersions {
-			for _, component := range assetVersion.AssetComponents {
-				normalizedPath := strings.TrimRight(assetVersion.Location.Path, "/")
-				files = append(files, provider.OutputFile{
-					Path:      fmt.Sprintf("%s/%s", normalizedPath, component.Name),
-					Container: containerFrom(component),
-					FileSize:  int64(component.Descriptor.Size),
+	for _, d := range task.Documents {
+		for _, a := range d.ResultPayload.Payload.AssetVersions {
+			dir := job.File{Name: a.Location.Path}
+			for _, c := range a.AssetComponents {
+				files = append(files, job.File{
+					Name:      dir.Join(c.Name).Name,
+					Container: containerFrom(c),
+					Size:      int64(c.Descriptor.Size),
 				})
 			}
 		}
@@ -78,7 +64,7 @@ func filesFrom(task hybrik.TaskResult) ([]provider.OutputFile, bool, error) {
 
 const assetMediaInfoType = "ASSET"
 
-func containerFrom(component hybrik.AssetComponentResult) string {
+func containerFrom(component hy.AssetComponentResult) string {
 	if infos := component.MediaAnalyze.MediaInfo; len(infos) > 0 {
 		for _, i := range infos {
 			if i.StreamType == assetMediaInfoType && i.ASSET.Format != "" {
@@ -88,18 +74,4 @@ func containerFrom(component hybrik.AssetComponentResult) string {
 	}
 
 	return strings.Replace(path.Ext(component.Name), ".", "", -1)
-}
-
-func taskHasOutputs(task hybrik.TaskResult, matchers []taskWithOutputMatcher) bool {
-	for _, matcher := range matchers {
-		if matcher.kind != task.Kind {
-			continue
-		}
-
-		if matcher.uidRegex.Match([]byte(task.UID)) {
-			return true
-		}
-	}
-
-	return false
 }

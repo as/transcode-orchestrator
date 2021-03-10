@@ -2,60 +2,36 @@ package mediaconvert
 
 import (
 	"fmt"
-	"strconv"
-	"strings"
 
-	"github.com/aws/aws-sdk-go-v2/service/mediaconvert"
+	mc "github.com/aws/aws-sdk-go-v2/service/mediaconvert"
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/cbsinteractive/transcode-orchestrator/db"
-	"github.com/pkg/errors"
+	"github.com/cbsinteractive/transcode-orchestrator/job"
 )
 
-func av1CodecSettingsFrom(preset db.Preset) (*mediaconvert.VideoCodecSettings, error) {
-	bitrate, err := strconv.ParseInt(preset.Video.Bitrate, 10, 64)
-	if err != nil {
-		return nil, errors.Wrapf(err, "parsing video bitrate %q to int64", preset.Video.Bitrate)
-	}
-
-	gopSize, err := av1GopSizeFrom(preset.Video.GopUnit, preset.Video.GopSize)
+func av1CodecSettingsFrom(f job.File) (*mc.VideoCodecSettings, error) {
+	bitrate := int64(f.Video.Bitrate.BPS)
+	gopSize, err := av1GopSizeFrom(f.Video.Gop)
 	if err != nil {
 		return nil, err
 	}
 
-	settings := &mediaconvert.VideoCodecSettings{
-		Codec: mediaconvert.VideoCodecAv1,
-		Av1Settings: &mediaconvert.Av1Settings{
+	return &mc.VideoCodecSettings{
+		Codec: mc.VideoCodecAv1,
+		Av1Settings: &mc.Av1Settings{
 			MaxBitrate: aws.Int64(bitrate),
 			GopSize:    aws.Float64(gopSize),
-			QvbrSettings: &mediaconvert.Av1QvbrSettings{
+			QvbrSettings: &mc.Av1QvbrSettings{
 				QvbrQualityLevel:         aws.Int64(7),
 				QvbrQualityLevelFineTune: aws.Float64(0),
 			},
-			RateControlMode: mediaconvert.Av1RateControlModeQvbr,
+			RateControlMode: mc.Av1RateControlModeQvbr,
 		},
-	}
-
-	if fr := preset.Video.Framerate; !fr.Empty() {
-		settings.Av1Settings.FramerateControl = mediaconvert.Av1FramerateControlSpecified
-		settings.Av1Settings.FramerateConversionAlgorithm = mediaconvert.Av1FramerateConversionAlgorithmInterpolate
-		settings.Av1Settings.FramerateNumerator = aws.Int64(int64(fr.Numerator))
-		settings.Av1Settings.FramerateDenominator = aws.Int64(int64(fr.Denominator))
-	}
-
-	return settings, nil
+	}, nil
 }
 
-func av1GopSizeFrom(gopUnit string, gopSize string) (float64, error) {
-	switch strings.ToLower(gopUnit) {
-	case "", db.GopUnitFrames:
-		f, err := strconv.ParseFloat(gopSize, 64)
-		if err != nil {
-			return 0, errors.Wrapf(err, "parsing gop size %q to float64", gopSize)
-		}
-		return f, nil
-	case db.GopUnitSeconds:
-		return 0, fmt.Errorf("gop unit %q is not supported with mediaconvert and AV1", gopUnit)
-	default:
-		return 0, fmt.Errorf("gop unit %q is not supported with mediaconvert", gopUnit)
+func av1GopSizeFrom(g job.Gop) (float64, error) {
+	if g.Seconds() {
+		return 0, fmt.Errorf(`gop unit "seconds" is not supported with mediaconvert and AV1`)
 	}
+	return g.Size, nil
 }

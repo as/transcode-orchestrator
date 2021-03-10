@@ -1,144 +1,121 @@
 package mediaconvert
 
 import (
+	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/mediaconvert"
-	"github.com/cbsinteractive/transcode-orchestrator/db"
-	"github.com/pkg/errors"
+	mc "github.com/aws/aws-sdk-go-v2/service/mediaconvert"
+	"github.com/cbsinteractive/transcode-orchestrator/job"
 )
 
-func h265CodecSettingsFrom(preset db.Preset) (*mediaconvert.VideoCodecSettings, error) {
-	bitrate, err := strconv.ParseInt(preset.Video.Bitrate, 10, 64)
-	if err != nil {
-		return nil, errors.Wrapf(err, "parsing video bitrate %q to int64", preset.Video.Bitrate)
-	}
+var (
+	ErrUnsupported = errors.New("unsupported")
+	ErrInvalid     = errors.New("invalid")
+)
 
-	gopSize, err := strconv.ParseFloat(preset.Video.GopSize, 64)
-	if err != nil {
-		return nil, errors.Wrapf(err, "parsing gop size %q to float64", preset.Video.GopSize)
-	}
-
-	gopUnit, err := h265GopUnitFrom(preset.Video.GopUnit)
+func h265CodecSettingsFrom(f job.File) (*mc.VideoCodecSettings, error) {
+	rateControl, err := h265RateControl(f.Video.Bitrate.Control)
 	if err != nil {
 		return nil, err
 	}
 
-	rateControl, err := h265RateControlModeFrom(preset.RateControl)
+	profile := mc.H265CodecProfileMainMain
+	if f.Video.HDR10.Enabled {
+		profile = mc.H265CodecProfileMain10Main
+	}
+
+	level, err := h265CodecLevelFrom(f.Video.Level)
 	if err != nil {
 		return nil, err
 	}
 
-	profile := mediaconvert.H265CodecProfileMainMain
-	if preset.Video.HDR10Settings.Enabled {
-		profile = mediaconvert.H265CodecProfileMain10Main
+	passes := mc.H265QualityTuningLevelSinglePassHq
+	if f.Video.Bitrate.TwoPass {
+		passes = mc.H265QualityTuningLevelMultiPassHq
 	}
 
-	level, err := h265CodecLevelFrom(preset.Video.ProfileLevel)
-	if err != nil {
-		return nil, err
-	}
-
-	tuning := mediaconvert.H265QualityTuningLevelSinglePassHq
-	if preset.TwoPass {
-		tuning = mediaconvert.H265QualityTuningLevelMultiPassHq
-	}
-
-	settings := &mediaconvert.VideoCodecSettings{
-		Codec: mediaconvert.VideoCodecH265,
-		H265Settings: &mediaconvert.H265Settings{
-			Bitrate:                        aws.Int64(bitrate),
-			GopSize:                        aws.Float64(gopSize),
-			GopSizeUnits:                   gopUnit,
+	return &mc.VideoCodecSettings{
+		Codec: mc.VideoCodecH265,
+		H265Settings: &mc.H265Settings{
+			Bitrate:                        aws.Int64(int64(f.Video.Bitrate.BPS)),
+			GopSize:                        aws.Float64(f.Video.Gop.Size),
+			GopSizeUnits:                   h265GopUnit(f.Video.Gop),
 			RateControlMode:                rateControl,
 			CodecProfile:                   profile,
 			CodecLevel:                     level,
-			InterlaceMode:                  mediaconvert.H265InterlaceModeProgressive,
-			ParControl:                     mediaconvert.H265ParControlSpecified,
+			InterlaceMode:                  mc.H265InterlaceModeProgressive,
+			ParControl:                     mc.H265ParControlSpecified,
 			ParNumerator:                   aws.Int64(1),
 			ParDenominator:                 aws.Int64(1),
-			QualityTuningLevel:             tuning,
-			WriteMp4PackagingType:          mediaconvert.H265WriteMp4PackagingTypeHvc1,
-			AlternateTransferFunctionSei:   mediaconvert.H265AlternateTransferFunctionSeiDisabled,
-			SpatialAdaptiveQuantization:    mediaconvert.H265SpatialAdaptiveQuantizationEnabled,
-			TemporalAdaptiveQuantization:   mediaconvert.H265TemporalAdaptiveQuantizationEnabled,
-			FlickerAdaptiveQuantization:    mediaconvert.H265FlickerAdaptiveQuantizationEnabled,
-			SceneChangeDetect:              mediaconvert.H265SceneChangeDetectEnabled,
-			UnregisteredSeiTimecode:        mediaconvert.H265UnregisteredSeiTimecodeDisabled,
-			SampleAdaptiveOffsetFilterMode: mediaconvert.H265SampleAdaptiveOffsetFilterModeAdaptive,
+			QualityTuningLevel:             passes,
+			WriteMp4PackagingType:          mc.H265WriteMp4PackagingTypeHvc1,
+			AlternateTransferFunctionSei:   mc.H265AlternateTransferFunctionSeiDisabled,
+			SpatialAdaptiveQuantization:    mc.H265SpatialAdaptiveQuantizationEnabled,
+			TemporalAdaptiveQuantization:   mc.H265TemporalAdaptiveQuantizationEnabled,
+			FlickerAdaptiveQuantization:    mc.H265FlickerAdaptiveQuantizationEnabled,
+			SceneChangeDetect:              mc.H265SceneChangeDetectEnabled,
+			UnregisteredSeiTimecode:        mc.H265UnregisteredSeiTimecodeDisabled,
+			SampleAdaptiveOffsetFilterMode: mc.H265SampleAdaptiveOffsetFilterModeAdaptive,
 		},
-	}
-
-	if fr := preset.Video.Framerate; !fr.Empty() {
-		settings.H265Settings.FramerateControl = mediaconvert.H265FramerateControlSpecified
-		settings.H265Settings.FramerateConversionAlgorithm = mediaconvert.H265FramerateConversionAlgorithmInterpolate
-		settings.H265Settings.FramerateNumerator = aws.Int64(int64(fr.Numerator))
-		settings.H265Settings.FramerateDenominator = aws.Int64(int64(fr.Denominator))
-	}
-
-	return settings, nil
+	}, nil
 }
 
-func h265GopUnitFrom(gopUnit string) (mediaconvert.H265GopSizeUnits, error) {
-	gopUnit = strings.ToLower(gopUnit)
-	switch gopUnit {
-	case "", db.GopUnitFrames:
-		return mediaconvert.H265GopSizeUnitsFrames, nil
-	case db.GopUnitSeconds:
-		return mediaconvert.H265GopSizeUnitsSeconds, nil
-	default:
-		return "", fmt.Errorf("gop unit %q is not supported with mediaconvert", gopUnit)
+func h265GopUnit(g job.Gop) mc.H265GopSizeUnits {
+	//  mc.H265GopSizeUnitsSeconds and  mc.H264GopSizeUnitsSeconds
+	// are the same thing
+	// aws = worst api ever
+	if g.Seconds() {
+		return mc.H265GopSizeUnitsSeconds
 	}
+	return mc.H265GopSizeUnitsFrames
 }
 
-func h265RateControlModeFrom(rateControl string) (mediaconvert.H265RateControlMode, error) {
-	rateControl = strings.ToLower(rateControl)
-	switch rateControl {
+func h265RateControl(v string) (mc.H265RateControlMode, error) {
+	switch strings.ToLower(v) {
 	case "vbr":
-		return mediaconvert.H265RateControlModeVbr, nil
+		return mc.H265RateControlModeVbr, nil
 	case "", "cbr":
-		return mediaconvert.H265RateControlModeCbr, nil
+		return mc.H265RateControlModeCbr, nil
 	case "qvbr":
-		return mediaconvert.H265RateControlModeQvbr, nil
+		return mc.H265RateControlModeQvbr, nil
 	default:
-		return "", fmt.Errorf("rate control mode %q is not supported with mediaconvert", rateControl)
+		return "", fmt.Errorf("h265: %w: rate control mode: %q", ErrUnsupported, v)
 	}
 }
 
-func h265CodecLevelFrom(level string) (mediaconvert.H265CodecLevel, error) {
-	switch level {
+func h265CodecLevelFrom(v string) (mc.H265CodecLevel, error) {
+	switch v {
 	case "":
-		return mediaconvert.H265CodecLevelAuto, nil
+		return mc.H265CodecLevelAuto, nil
 	case "1", "1.0":
-		return mediaconvert.H265CodecLevelLevel1, nil
+		return mc.H265CodecLevelLevel1, nil
 	case "2", "2.0":
-		return mediaconvert.H265CodecLevelLevel2, nil
+		return mc.H265CodecLevelLevel2, nil
 	case "2.1":
-		return mediaconvert.H265CodecLevelLevel21, nil
+		return mc.H265CodecLevelLevel21, nil
 	case "3", "3.0":
-		return mediaconvert.H265CodecLevelLevel3, nil
+		return mc.H265CodecLevelLevel3, nil
 	case "3.1":
-		return mediaconvert.H265CodecLevelLevel31, nil
+		return mc.H265CodecLevelLevel31, nil
 	case "4", "4.0":
-		return mediaconvert.H265CodecLevelLevel4, nil
+		return mc.H265CodecLevelLevel4, nil
 	case "4.1":
-		return mediaconvert.H265CodecLevelLevel41, nil
+		return mc.H265CodecLevelLevel41, nil
 	case "5", "5.0":
-		return mediaconvert.H265CodecLevelLevel5, nil
+		return mc.H265CodecLevelLevel5, nil
 	case "5.1":
-		return mediaconvert.H265CodecLevelLevel51, nil
+		return mc.H265CodecLevelLevel51, nil
 	case "5.2":
-		return mediaconvert.H265CodecLevelLevel52, nil
+		return mc.H265CodecLevelLevel52, nil
 	case "6", "6.0":
-		return mediaconvert.H265CodecLevelLevel6, nil
+		return mc.H265CodecLevelLevel6, nil
 	case "6.1":
-		return mediaconvert.H265CodecLevelLevel61, nil
+		return mc.H265CodecLevelLevel61, nil
 	case "6.2":
-		return mediaconvert.H265CodecLevelLevel62, nil
+		return mc.H265CodecLevelLevel62, nil
 	default:
-		return "", fmt.Errorf("h265 level %q is not supported with mediaconvert", level)
+		return "", fmt.Errorf("h265: %w: level: %q", ErrUnsupported, v)
 	}
 }

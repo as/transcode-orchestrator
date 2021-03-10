@@ -8,13 +8,10 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/cbsinteractive/transcode-orchestrator/config"
-	"github.com/cbsinteractive/transcode-orchestrator/db"
-	"github.com/cbsinteractive/transcode-orchestrator/db/redis"
+	"github.com/cbsinteractive/transcode-orchestrator/job"
 	"github.com/cbsinteractive/transcode-orchestrator/provider"
 )
 
@@ -31,9 +28,8 @@ func init() {
 }
 
 type flock struct {
-	cfg        *config.Flock
-	repository db.Repository
-	client     *http.Client
+	cfg    *config.Flock
+	client *http.Client
 }
 
 type JobRequest struct {
@@ -94,19 +90,19 @@ type JobResponseOutput struct {
 	UpdateTimestamp float64 `json:"update_timestamp"`
 }
 
-func (p *flock) Transcode(ctx context.Context, job *db.Job) (*provider.JobStatus, error) {
-	jobReq, err := p.flockJobRequestFrom(ctx, job)
+func (p *flock) Create(ctx context.Context, j *job.Job) (*job.Status, error) {
+	jr, err := p.flockJobRequestFrom(j)
 	if err != nil {
 		return nil, fmt.Errorf("generating flock job request: %w", err)
 	}
 
-	jsonValue, err := json.Marshal(jobReq)
+	data, err := json.Marshal(jr)
 	if err != nil {
-		return nil, fmt.Errorf("marshaling job request %+v to json: %w", jobReq, err)
+		return nil, fmt.Errorf("marshaling job request %+v to json: %w", jr, err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		fmt.Sprintf("%s/api/v1/jobs", p.cfg.Endpoint), bytes.NewBuffer(jsonValue))
+		fmt.Sprintf("%s/api/v1/jobs", p.cfg.Endpoint), bytes.NewBuffer(data))
 	if err != nil {
 		return nil, fmt.Errorf("creating job request: %w", err)
 	}
@@ -130,113 +126,51 @@ func (p *flock) Transcode(ctx context.Context, job *db.Job) (*provider.JobStatus
 		return nil, fmt.Errorf("parsing flock response: %w", err)
 	}
 
-	return &provider.JobStatus{
-		ProviderName:  Name,
+	return &job.Status{
+		Provider:      Name,
 		ProviderJobID: fmt.Sprintf("%d", newJob.JobID),
-		Status:        provider.StatusQueued,
+		State:         job.StateQueued,
 	}, nil
 }
 
-func (p *flock) flockJobRequestFrom(ctx context.Context, job *db.Job) (*JobRequest, error) {
-	presets := []db.Preset{}
-	for _, output := range job.Outputs {
-		presetName := output.Preset.Name
-		presetResponse, err := p.GetPreset(ctx, presetName)
-		if err != nil {
-			return nil, err
-		}
+func NewRequest(j *job.Job) (*JobRequest, error) {
+	fj := &JobRequest{}
+	fj.Job.Source = j.Input.Name
+	fj.Job.Labels = j.Labels
 
-		localPreset, ok := presetResponse.(*db.LocalPreset)
-		if !ok {
-			return nil, fmt.Errorf("could not convert preset response into a db.LocalPreset")
+	for _, orc := range j.Output.File {
+		flock := JobOutput{
+			Preset:           "slow",
+			Destination:      j.Location(orc.Name),
+			VideoCodec:       orc.Video.Codec,
+			Width:            orc.Video.Width,
+			Height:           orc.Video.Height,
+			MultiPass:        orc.Video.Bitrate.TwoPass,
+			VideoBitrateKbps: orc.Video.Bitrate.BPS / 1000,
+			AudioBitrateKbps: orc.Audio.Bitrate / 1000,
+			AudioCodec:       orc.Audio.Codec,
 		}
-
-		presets = append(presets, localPreset.Preset)
+		if flock.AudioBitrateKbps != 0 {
+			flock.AudioChannels = 2
+		}
+		if flock.VideoCodec == "hevc" {
+			flock.Tag = "hvc1"
+		}
+		if orc.Video.Gop.Seconds() {
+			flock.KeyframesPerSecond = int(orc.Video.Gop.Size)
+		} else {
+			flock.KeyframeInterval = int(orc.Video.Gop.Size)
+		}
+		fj.Job.Outputs = append(fj.Job.Outputs, flock)
 	}
-
-	var jobReq JobRequest
-	jobReq.Job.Source = job.SourceMedia
-
-	for _, label := range job.Labels {
-		jobReq.Job.Labels = append(jobReq.Job.Labels, label)
-	}
-
-	jobOuts := make([]JobOutput, 0, len(job.Outputs))
-	for i, output := range job.Outputs {
-		var jobOut JobOutput
-		jobOut.Destination = joinBaseAndParts(job.DestinationBasePath, job.RootFolder(), output.FileName)
-		jobOut.AudioCodec = presets[i].Audio.Codec
-		jobOut.VideoCodec = presets[i].Video.Codec
-		jobOut.Preset = "slow"
-		jobOut.MultiPass = presets[i].TwoPass
-
-		if jobOut.VideoCodec == "hevc" {
-			jobOut.Tag = "hvc1"
-		}
-
-		if presets[i].Video.GopSize != "" {
-			gopSize, err := strconv.Atoi(presets[i].Video.GopSize)
-			if err != nil {
-				return nil, fmt.Errorf("setting keyframes_sec for flock job request: %w", err)
-			}
-
-			units := presets[i].Video.GopUnit
-			if units == db.GopUnitSeconds {
-				jobOut.KeyframesPerSecond = gopSize
-			} else {
-				jobOut.KeyframeInterval = gopSize
-			}
-		}
-
-		if presets[i].Video.Bitrate != "" {
-			bitrate, err := strconv.Atoi(presets[i].Video.Bitrate)
-			if err != nil {
-				return nil, fmt.Errorf("setting video bitrate for flock job request: %w", err)
-			}
-			if bitrate > 0 {
-				jobOut.VideoBitrateKbps = bitrate / 1000
-			}
-		}
-
-		if presets[i].Audio.Bitrate != "" {
-			bitrate, err := strconv.Atoi(presets[i].Audio.Bitrate)
-			if err != nil {
-				return nil, fmt.Errorf("setting audio bitrate for flock job request: %w", err)
-			}
-			if bitrate > 0 {
-				jobOut.AudioBitrateKbps = bitrate / 1000
-				jobOut.AudioChannels = 2
-			}
-		}
-
-		if presets[i].Video.Width != "" {
-			w, err := strconv.Atoi(presets[i].Video.Width)
-			if err != nil {
-				return nil, fmt.Errorf("setting width for flock job request: %w", err)
-			}
-			if w > 0 {
-				jobOut.Width = w
-			}
-		}
-
-		if presets[i].Video.Height != "" {
-			h, err := strconv.Atoi(presets[i].Video.Height)
-			if err != nil {
-				return nil, fmt.Errorf("setting height for flock job request: %w", err)
-			}
-			if h > 0 {
-				jobOut.Height = h
-			}
-		}
-
-		jobOuts = append(jobOuts, jobOut)
-	}
-
-	jobReq.Job.Outputs = jobOuts
-	return &jobReq, nil
+	return fj, nil
 }
 
-func (p *flock) JobStatus(ctx context.Context, job *db.Job) (*provider.JobStatus, error) {
+func (p *flock) flockJobRequestFrom(j *job.Job) (*JobRequest, error) {
+	return NewRequest(j)
+}
+
+func (p *flock) Status(ctx context.Context, job *job.Job) (*job.Status, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		fmt.Sprintf("%s/api/v1/jobs/%s", p.cfg.Endpoint, job.ProviderJobID), nil)
 	if err != nil {
@@ -272,94 +206,57 @@ func (p *flock) JobStatus(ctx context.Context, job *db.Job) (*provider.JobStatus
 	return p.jobStatusFrom(job, &jobResp), nil
 }
 
-func (p *flock) jobStatusFrom(job *db.Job, jobResp *JobResponse) *provider.JobStatus {
-	status := &provider.JobStatus{
-		ProviderJobID: job.ProviderJobID,
-		ProviderName:  Name,
+func (p *flock) jobStatusFrom(j *job.Job, fj *JobResponse) *job.Status {
+	status := &job.Status{
+		Progress:      fj.Progress,
+		ProviderJobID: j.ProviderJobID,
+		Provider:      Name,
 		ProviderStatus: map[string]interface{}{
-			"create_timestamp": jobResp.CreateTimestamp,
-			"update_timestamp": jobResp.UpdateTimestamp,
-			"duration":         jobResp.Duration,
-			"progress":         jobResp.Progress,
-			"status":           jobResp.Status,
+			"create_timestamp": fj.CreateTimestamp,
+			"update_timestamp": fj.UpdateTimestamp,
+			"duration":         fj.Duration,
+			"progress":         fj.Progress,
+			"status":           fj.Status,
 		},
-		Status: statusFrom(jobResp),
-		Output: provider.JobOutput{
-			Destination: joinBaseAndParts(job.DestinationBasePath, job.RootFolder()),
-		},
-		Labels: job.Labels,
+		State:  state(fj),
+		Output: job.Dir{Path: j.Location("")},
+		Labels: j.Labels,
 	}
 
-	outputsStatus := make([]map[string]interface{}, 0, len(jobResp.Outputs))
-	outputFiles := make([]provider.OutputFile, 0, len(jobResp.Outputs))
-
-	for _, output := range jobResp.Outputs {
-		outputFiles = append(outputFiles, provider.OutputFile{Path: output.Destination})
-		outputsStatus = append(outputsStatus, map[string]interface{}{
-			"duration":         output.Duration,
-			"destination":      output.Destination,
-			"encoder":          output.Encoder,
-			"info":             output.Info,
-			"status":           output.Status,
-			"progress":         output.Progress,
-			"update_timestamp": output.UpdateTimestamp,
+	outstatus := []map[string]interface{}{}
+	for _, o := range fj.Outputs {
+		status.Output.File = append(status.Output.File, job.File{Name: o.Destination})
+		outstatus = append(outstatus, map[string]interface{}{
+			"duration":         o.Duration,
+			"destination":      o.Destination,
+			"encoder":          o.Encoder,
+			"info":             o.Info,
+			"status":           o.Status,
+			"progress":         o.Progress,
+			"update_timestamp": o.UpdateTimestamp,
 		})
 	}
-
-	status.Output.Files = outputFiles
-	status.ProviderStatus["outputs"] = outputsStatus
-	status.Progress = jobResp.Progress
+	status.ProviderStatus["outputs"] = outstatus
 	return status
 }
 
-func joinBaseAndParts(base string, elem ...string) string {
-	parts := []string{strings.TrimRight(base, "/")}
-	parts = append(parts, elem...)
-	return strings.Join(parts, "/")
-}
-
-func statusFrom(job *JobResponse) provider.Status {
-	switch job.Status {
+func state(j *JobResponse) job.State {
+	switch j.Status {
 	case "submitted":
-		return provider.StatusQueued
+		return job.StateQueued
 	case "assigned", "transcoding":
-		return provider.StatusStarted
+		return job.StateStarted
 	case "complete":
-		return provider.StatusFinished
+		return job.StateFinished
 	case "cancelled":
-		return provider.StatusCanceled
+		return job.StateCanceled
 	case "error":
-		return provider.StatusFailed
+		return job.StateFailed
 	}
-	return provider.StatusUnknown
+	return job.StateUnknown
 }
 
-func (p *flock) CreatePreset(_ context.Context, preset db.Preset) (string, error) {
-	err := p.repository.CreateLocalPreset(&db.LocalPreset{
-		Name:   preset.Name,
-		Preset: preset,
-	})
-	if err != nil {
-		return "", err
-	}
-
-	return preset.Name, nil
-}
-
-func (p *flock) GetPreset(_ context.Context, presetID string) (interface{}, error) {
-	return p.repository.GetLocalPreset(presetID)
-}
-
-func (p *flock) DeletePreset(ctx context.Context, presetID string) error {
-	preset, err := p.GetPreset(ctx, presetID)
-	if err != nil {
-		return err
-	}
-
-	return p.repository.DeleteLocalPreset(preset.(*db.LocalPreset))
-}
-
-func (p *flock) CancelJob(ctx context.Context, providerID string) error {
+func (p *flock) Cancel(ctx context.Context, providerID string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, fmt.Sprintf("%s/api/v1/jobs/%s", p.cfg.Endpoint, providerID), nil)
 	if err != nil {
 		return err
@@ -405,19 +302,13 @@ func (*flock) Capabilities() provider.Capabilities {
 	}
 }
 
-func flockFactory(cfg *config.Config) (provider.TranscodingProvider, error) {
+func flockFactory(cfg *config.Config) (provider.Provider, error) {
 	if cfg.Flock.Endpoint == "" || cfg.Flock.Credential == "" {
 		return nil, errors.New("incomplete Flock config")
 	}
 
-	dbRepo, err := redis.NewRepository(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("error initializing flock wrapper: %s", err)
-	}
-
 	return &flock{
-		cfg:        cfg.Flock,
-		repository: dbRepo,
-		client:     &http.Client{Timeout: time.Second * 30},
+		cfg:    cfg.Flock,
+		client: &http.Client{Timeout: time.Second * 30},
 	}, nil
 }

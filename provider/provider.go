@@ -5,51 +5,32 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"time"
 
 	"github.com/cbsinteractive/transcode-orchestrator/config"
-	"github.com/cbsinteractive/transcode-orchestrator/db"
+	"github.com/cbsinteractive/transcode-orchestrator/job"
 )
+
+var providers = map[string]Factory{}
 
 var (
-	// ErrProviderAlreadyRegistered is the error returned when trying to register a
-	// provider twice.
-	ErrProviderAlreadyRegistered = errors.New("provider is already registered")
-
-	// ErrProviderNotFound is the error returned when asking for a provider
-	// that is not registered.
-	ErrProviderNotFound = errors.New("provider not found")
-
-	// ErrPresetMapNotFound is the error returned when the given preset is not
-	// found in the provider.
-	ErrPresetMapNotFound = errors.New("preset not found in provider")
+	ErrRegistered = errors.New("provider is already registered")
+	ErrNotFound   = errors.New("provider not found")
+	ErrConfig     = errors.New("bad provider configuration")
+	ErrPreset     = errors.New("preset not found in provider")
 )
 
-// TranscodingProvider represents a provider of transcoding.
-//
-// It defines a basic API for transcoding a media and query the status of a
-// Job. The underlying provider should handle the profileSpec as desired (it
-// might be a JSON, or an XML, or anything else.
-type TranscodingProvider interface {
-	Transcode(context.Context, *db.Job) (*JobStatus, error)
-	JobStatus(context.Context, *db.Job) (*JobStatus, error)
-	CancelJob(ctx context.Context, id string) error
-	CreatePreset(context.Context, db.Preset) (string, error)
-	DeletePreset(ctx context.Context, presetID string) error
-	GetPreset(ctx context.Context, presetID string) (interface{}, error)
-
-	// Healthcheck should return nil if the provider is currently available
-	// for transcoding videos, otherwise it should return an error
-	// explaining what's going on.
+// Provider knows how to manage jobs for media transcoding
+type Provider interface {
+	Create(context.Context, *job.Job) (*job.Status, error)
+	Status(context.Context, *job.Job) (*job.Status, error)
+	Cancel(ctx context.Context, id string) error
 	Healthcheck() error
-
-	// Capabilities describes the capabilities of the provider.
 	Capabilities() Capabilities
 }
 
 // Factory is the function responsible for creating the instance of a
 // provider.
-type Factory func(cfg *config.Config) (TranscodingProvider, error)
+type Factory func(cfg *config.Config) (Provider, error)
 
 // InvalidConfigError is returned if a provider could not be configured properly
 type InvalidConfigError string
@@ -67,85 +48,10 @@ func (err JobNotFoundError) Error() string {
 	return fmt.Sprintf("could not found job with id: %s", err.ID)
 }
 
-// JobStatus is the representation of the status as the provide sees it. The
-// provider is able to add customized information in the ProviderStatus field.
-//
-// swagger:model
-type JobStatus struct {
-	ProviderJobID  string                 `json:"providerJobId,omitempty"`
-	Status         Status                 `json:"status,omitempty"`
-	ProviderName   string                 `json:"providerName,omitempty"`
-	StatusMessage  string                 `json:"statusMessage,omitempty"`
-	Progress       float64                `json:"progress"`
-	ProviderStatus map[string]interface{} `json:"providerStatus,omitempty"`
-	Output         JobOutput              `json:"output"`
-	SourceInfo     SourceInfo             `json:"sourceInfo,omitempty"`
-	Labels         []string               `json:"labels,omitempty"`
-}
-
-// JobOutput represents information about a job output.
-type JobOutput struct {
-	Destination string       `json:"destination,omitempty"`
-	Files       []OutputFile `json:"files,omitempty"`
-}
-
-// OutputFile represents an output file in a given job.
-type OutputFile struct {
-	Path       string `json:"path"`
-	Container  string `json:"container"`
-	VideoCodec string `json:"videoCodec,omitempty"`
-	Height     int64  `json:"height,omitempty"`
-	Width      int64  `json:"width,omitempty"`
-	FileSize   int64  `json:"fileSize,omitempty"`
-}
-
-// SourceInfo contains information about media transcoded using the Transcoding
-// API.
-type SourceInfo struct {
-	// Duration of the media
-	Duration time.Duration `json:"duration,omitempty"`
-
-	// Dimension of the media, in pixels
-	Height int64 `json:"height,omitempty"`
-	Width  int64 `json:"width,omitempty"`
-
-	// Codec used for video medias
-	VideoCodec string `json:"videoCodec,omitempty"`
-}
-
-// Status is the status of a transcoding job.
-type Status string
-
-const (
-	// StatusQueued is the status for a job that is in the queue for
-	// execution.
-	StatusQueued = Status("queued")
-
-	// StatusStarted is the status for a job that is being executed.
-	StatusStarted = Status("started")
-
-	// StatusFinished is the status for a job that finished successfully.
-	StatusFinished = Status("finished")
-
-	// StatusFailed is the status for a job that has failed.
-	StatusFailed = Status("failed")
-
-	// StatusCanceled is the status for a job that has been canceled.
-	StatusCanceled = Status("canceled")
-
-	// StatusUnknown is an unexpected status for a job.
-	StatusUnknown = Status("unknown")
-)
-
-var providers map[string]Factory
-
 // Register register a new provider in the internal list of providers.
 func Register(name string, provider Factory) error {
-	if providers == nil {
-		providers = make(map[string]Factory)
-	}
 	if _, ok := providers[name]; ok {
-		return ErrProviderAlreadyRegistered
+		return ErrRegistered
 	}
 	providers[name] = provider
 	return nil
@@ -153,17 +59,17 @@ func Register(name string, provider Factory) error {
 
 // GetProviderFactory looks up the list of registered providers and returns the
 // factory function for the given provider name, if it's available.
-func GetProviderFactory(name string) (Factory, error) {
+func GetFactory(name string) (Factory, error) {
 	factory, ok := providers[name]
 	if !ok {
-		return nil, ErrProviderNotFound
+		return nil, ErrNotFound
 	}
 	return factory, nil
 }
 
-// ListProviders returns the list of currently registered providers,
+// List returns the list of currently registered providers,
 // alphabetically ordered.
-func ListProviders(c *config.Config) []string {
+func List(c *config.Config) []string {
 	providerNames := make([]string, 0, len(providers))
 	for name, factory := range providers {
 		if _, err := factory(c); err == nil {
@@ -174,10 +80,10 @@ func ListProviders(c *config.Config) []string {
 	return providerNames
 }
 
-// DescribeProvider describes the given provider. It includes information about
+// Describe describes the given provider. It includes information about
 // the provider's capabilities and its current health state.
-func DescribeProvider(name string, c *config.Config) (*Description, error) {
-	factory, err := GetProviderFactory(name)
+func Describe(name string, c *config.Config) (*Description, error) {
+	factory, err := GetFactory(name)
 	if err != nil {
 		return nil, err
 	}
