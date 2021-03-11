@@ -8,9 +8,9 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/cbsinteractive/transcode-orchestrator/client/transcoding/job"
 	"github.com/cbsinteractive/transcode-orchestrator/config"
 	"github.com/cbsinteractive/transcode-orchestrator/db"
-	"github.com/cbsinteractive/transcode-orchestrator/job"
 	transcoding "github.com/cbsinteractive/transcode-orchestrator/provider"
 	"github.com/cbsinteractive/transcode-orchestrator/service/exceptions"
 	"github.com/sirupsen/logrus"
@@ -45,6 +45,7 @@ func (s *Server) serve() bool {
 			if !s.request.UnmarshalJSON(job) {
 				return false
 			}
+			log.Printf("job: %#v", job)
 			stat, err := s.putJob0(job)
 			if err != nil {
 				return s.writeerror("put job failed", 400, err)

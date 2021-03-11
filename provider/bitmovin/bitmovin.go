@@ -8,8 +8,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/cbsinteractive/transcode-orchestrator/client/transcoding/job"
 	"github.com/cbsinteractive/transcode-orchestrator/config"
-	"github.com/cbsinteractive/transcode-orchestrator/job"
 	"github.com/cbsinteractive/transcode-orchestrator/provider"
 	"github.com/cbsinteractive/transcode-orchestrator/provider/bitmovin/codec"
 	"github.com/cbsinteractive/transcode-orchestrator/provider/bitmovin/storage"
@@ -98,7 +98,7 @@ func (p *driver) Create(ctx context.Context, j *Job) (*Status, error) {
 		}
 	}
 
-	inputPath := j.Input.Name
+	inputPath := j.Input.URL().Path
 	inputID, err := p.inputFrom(ctx, j)
 	if err != nil {
 		return nil, err
